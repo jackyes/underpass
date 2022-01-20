@@ -35,7 +35,10 @@ var upgrader = websocket.Upgrader{}
 
 func main() {
 	host := flag.String("host", "", "")
-
+	CertCrt := flag.String("CertCrt", "", "Path to CertCrt")
+	CertKey := flag.String("CertKey", "", "Path to CertKey")
+	port := flag.String("port", "80", "Local server port")
+	TLS := flag.Bool("TLS", false, "Enable TLS (need -CertCrt <path> and -CertKey <path>")
 	flag.Parse()
 
 	r := mux.NewRouter()
@@ -244,6 +247,10 @@ func main() {
 	})
 
 	log.Println("starting...")
-
-	http.ListenAndServe(":80", r)
+	if *TLS && *CertCrt != "" && *CertKey != "" {
+		err := http.ListenAndServeTLS(":"+*port, *CertCrt, *CertKey, r)
+		fmt.Println(err)
+	} else {
+		http.ListenAndServe(":80", r)
+	}
 }
