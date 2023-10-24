@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/cjdenio/jackyes/pkg/client/cmd"
+	"github.com/jackyes/underpass/pkg/client/cmd"
 )
 
 func main() {
