@@ -5,7 +5,7 @@ import (
 	"net/url"
 	"os"
 
-	"github.com/cjdenio/underpass/pkg/client/tunnel"
+	"github.com/cjdenio/jackyes/pkg/client/tunnel"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
