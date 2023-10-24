@@ -34,7 +34,7 @@ var tunnels = make(map[string]*Tunnel)
 var upgrader = websocket.Upgrader{}
 
 func main() {
-	host := flag.String("host", "", "")
+	host := flag.String("host", "", "Host address")
 	CertCrt := flag.String("CertCrt", "", "Path to CertCrt")
 	CertKey := flag.String("CertKey", "", "Path to CertKey")
 	port := flag.String("port", "80", "Local server port")
@@ -43,7 +43,7 @@ func main() {
 
 	r := mux.NewRouter()
 
-	r.Handle("/", http.RedirectHandler("https://github.com/cjdenio/underpass", http.StatusTemporaryRedirect)).Host(*host)
+	r.Handle("/", http.RedirectHandler("https://github.com/jackyes/underpass", http.StatusTemporaryRedirect)).Host(*host)
 
 	r.HandleFunc("/start", func(rw http.ResponseWriter, r *http.Request) {
 		subdomain := r.URL.Query().Get("subdomain")
