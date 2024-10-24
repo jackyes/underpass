@@ -36,14 +36,14 @@ Usage:
   underpass [flags]
 
 Flags:
+      --address string     Address to forward requests to (default "http://localhost:8080")
   -h, --help               help for underpass
       --host string        Host to connect to (default "underpass.clb.li")
-  -p, --port int           Port to tunnel to
   -s, --subdomain string   Request a custom subdomain
   -t, --token string       Authentication token
 
 
-underpass -p <port> --host <host here> -s <optional subdomain> -t <your_secure_key>
+underpass --address <ip>:<port> --host <host here> -s <optional subdomain> -t <your_secure_key>
 ```
 
 
