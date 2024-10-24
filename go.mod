@@ -1,4 +1,4 @@
-module github.com/cjdenio/underpass
+module github.com/jackyes/underpass
 
 go 1.17
 
