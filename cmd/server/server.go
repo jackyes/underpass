@@ -13,7 +13,6 @@ import (
 	"github.com/jackyes/underpass/pkg/util"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
-	gonanoid "github.com/matoous/go-nanoid/v2"
 )
 
 type Request struct {
@@ -39,6 +38,7 @@ func main() {
 	CertKey := flag.String("CertKey", "", "Path to CertKey")
 	port := flag.String("port", "80", "Local server port")
 	TLS := flag.Bool("TLS", false, "Enable TLS (need -CertCrt <path> and -CertKey <path>")
+	authToken := flag.String("token", "", "Authentication token for clients")
 	flag.Parse()
 
 	r := mux.NewRouter()
@@ -46,10 +46,28 @@ func main() {
 	r.Handle("/", http.RedirectHandler("https://github.com/jackyes/underpass", http.StatusTemporaryRedirect)).Host(*host)
 
 	r.HandleFunc("/start", func(rw http.ResponseWriter, r *http.Request) {
-		subdomain := r.URL.Query().Get("subdomain")
-		if subdomain == "" {
-			subdomain, _ = gonanoid.Generate("abcdefghijklmnopqrstuvwxyz0123456789", 5)
+		// Verifica del token di autenticazione
+		if *authToken != "" {
+			authHeader := r.Header.Get("Authorization")
+			if !strings.HasPrefix(authHeader, "Bearer ") || strings.TrimPrefix(authHeader, "Bearer ") != *authToken {
+				log.Printf("Unauthorized access attempt from %s\n", r.RemoteAddr)
+				rw.WriteHeader(http.StatusUnauthorized)
+				rw.Write([]byte("Unauthorized: Invalid or missing authentication token"))
+				return
+			}
 		}
+
+		// Extract and clean the subdomain from query
+		subdomain := strings.TrimSpace(r.URL.Query().Get("subdomain"))
+		if subdomain == "" {
+			rw.WriteHeader(http.StatusBadRequest)
+			rw.Write([]byte("Subdomain is required"))
+			return
+		}
+		// Clean the subdomain by removing any path or query components
+		subdomain = strings.Split(subdomain, "/")[0]
+		subdomain = strings.Split(subdomain, "?")[0]
+		subdomain = strings.Split(subdomain, "&")[0]
 
 		c, err := upgrader.Upgrade(rw, r, nil)
 		if err != nil {
@@ -85,6 +103,7 @@ func main() {
 
 		tunnels[subdomain] = &t
 
+		log.Printf("New tunnel created with subdomain: %s\n", subdomain)
 		writeMutex.Lock()
 		err = util.WriteMsgPack(c, models.ServerMessage{
 			Type:      "subdomain",
@@ -102,8 +121,11 @@ func main() {
 				var message models.ClientMessage
 				err = util.ReadMsgPack(c, &message)
 				if err != nil {
+					log.Printf("Connection closed for subdomain: %s\n", subdomain)
 					close(closeChan)
 					c.Close()
+					delete(tunnels, subdomain)
+					log.Printf("Tunnel removed for subdomain: %s\n", subdomain)
 					break
 				}
 
@@ -242,16 +264,25 @@ func main() {
 				}
 			}
 		} else {
+			log.Printf("Tunnel not found for subdomain: %s (active tunnels: %d)\n", subdomain, len(tunnels))
 			rw.WriteHeader(http.StatusNotFound)
 			rw.Write([]byte(fmt.Sprintf("Tunnel %[1]s not found.\n\nStart it with `underpass -p PORT -s %[1]s` 😎", subdomain)))
 		}
 	})
 
 	log.Println("starting...")
+	log.Printf("Server starting on port %s...\n", *port)
 	if *TLS && *CertCrt != "" && *CertKey != "" {
+		log.Printf("Starting with TLS enabled\n")
 		err := http.ListenAndServeTLS(":"+*port, *CertCrt, *CertKey, r)
-		fmt.Println(err)
+		if err != nil {
+			log.Fatalf("Error starting server: %v", err)
+		}
 	} else {
-		http.ListenAndServe(":80", r)
+		log.Printf("Starting without TLS\n")
+		err := http.ListenAndServe(":"+*port, r)
+		if err != nil {
+			log.Fatalf("Error starting server: %v", err)
+		}
 	}
 }

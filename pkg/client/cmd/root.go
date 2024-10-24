@@ -5,7 +5,8 @@ import (
 	"net/url"
 	"os"
 
-	"github.com/cjdenio/jackyes/pkg/client/tunnel"
+	"github.com/jackyes/underpass/pkg/client/tunnel"
+	"github.com/matoous/go-nanoid/v2"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -14,6 +15,7 @@ var host string
 var insecure bool
 var port int
 var subdomain string
+var authToken string
 
 var rootCmd = &cobra.Command{
 	Use:   "underpass",
@@ -24,30 +26,54 @@ var rootCmd = &cobra.Command{
 			scheme = "ws"
 		}
 
+		// Generate random subdomain if not specified
+		if subdomain == "" {
+			var err error
+			subdomain, err = gonanoid.Generate("abcdefghijklmnopqrstuvwxyz0123456789", 8)
+			if err != nil {
+				fmt.Println("Error generating subdomain:", err)
+				os.Exit(1)
+			}
+		}
+
 		query := url.Values{}
-		if subdomain != "" {
-			query.Set("subdomain", subdomain)
+		query.Set("subdomain", subdomain)
+
+		// Strip any protocol prefix from host
+		cleanHost := host
+		if prefix := "https://"; len(host) > len(prefix) && host[:len(prefix)] == prefix {
+			cleanHost = host[len(prefix):]
+		} else if prefix := "http://"; len(host) > len(prefix) && host[:len(prefix)] == prefix {
+			cleanHost = host[len(prefix):]
 		}
 
 		u := url.URL{
 			Scheme:   scheme,
 			Path:     "start",
-			Host:     host,
+			Host:     cleanHost,
 			RawQuery: query.Encode(),
 		}
 
-		t, err := tunnel.Connect(u.String(), fmt.Sprintf("http://localhost:%d", port))
+		t, err := tunnel.Connect(u.String(), fmt.Sprintf("http://localhost:%d", port), subdomain, authToken)
 		if err != nil {
 			fmt.Println(err)
 			os.Exit(1)
 			return
 		}
 
+		// Clean display host from any protocol prefix
+		displayHost := host
+		if prefix := "https://"; len(host) > len(prefix) && host[:len(prefix)] == prefix {
+			displayHost = host[len(prefix):]
+		} else if prefix := "http://"; len(host) > len(prefix) && host[:len(prefix)] == prefix {
+			displayHost = host[len(prefix):]
+		}
+
 		fmt.Print("Started tunnel: ")
 		if insecure {
-			color.New(color.Bold, color.FgGreen).Printf("http://%s.%s", t.Subdomain, host)
+			color.New(color.Bold, color.FgGreen).Printf("http://%s.%s", t.Subdomain, displayHost)
 		} else {
-			color.New(color.Bold, color.FgGreen).Printf("https://%s.%s", t.Subdomain, host)
+			color.New(color.Bold, color.FgGreen).Printf("https://%s.%s", t.Subdomain, displayHost)
 		}
 		color.New(color.FgHiBlack).Print(" --> ")
 		color.New(color.Bold, color.FgCyan).Printf("http://localhost:%d\n\n", port)
@@ -71,6 +97,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&insecure, "insecure", false, "[ADVANCED] don't tunnel over TLS")
 	rootCmd.Flags().IntVarP(&port, "port", "p", 0, "Port to tunnel to")
 	rootCmd.Flags().StringVarP(&subdomain, "subdomain", "s", "", "Request a custom subdomain")
+	rootCmd.Flags().StringVarP(&authToken, "token", "t", "", "Authentication token")
 
 	rootCmd.MarkFlagRequired("port")
 	rootCmd.Flags().MarkHidden("insecure")

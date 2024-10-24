@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
-
 	"context"
 
 	"github.com/jackyes/underpass/pkg/models"
@@ -26,10 +26,47 @@ type Tunnel struct {
 	activeRequests map[int]*io.PipeWriter
 }
 
-func Connect(url, address string) (*Tunnel, error) {
-	c, _, err := websocket.DefaultDialer.Dial(url, nil)
+// Connect establishes a tunnel connection with optional authentication
+func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
+	header := http.Header{}
+	if authToken != "" {
+		header.Add("Authorization", "Bearer "+authToken)
+		fmt.Printf("Connected to subdomain: %s\n", address)
+	}
+
+	// Clean and normalize the URL
+	cleanURL := url
+	if strings.HasPrefix(cleanURL, "ws://") {
+		cleanURL = strings.TrimPrefix(cleanURL, "ws://")
+	} else if strings.HasPrefix(cleanURL, "wss://") {
+		cleanURL = strings.TrimPrefix(cleanURL, "wss://")
+	}
+	
+	// Determine if we should use wss:// based on the input
+	scheme := "ws"
+	if strings.HasPrefix(url, "https://") || strings.HasPrefix(url, "wss://") {
+		scheme = "wss"
+	}
+
+	// Ensure subdomain is clean
+	cleanSubdomain := strings.Split(subdomain, "/")[0]
+	
+	// Construct the complete URL with the subdomain parameter
+	fullURL := fmt.Sprintf("%s://%s/start?subdomain=%s", scheme, cleanURL, cleanSubdomain)
+	fmt.Printf("Attempting to connect to: %s\n", fullURL)
+
+	// Create a custom dialer with debug logging
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 45 * time.Second,
+	}
+
+	fmt.Printf("Headers: %v\n", header)
+	c, resp, err := dialer.Dial(fullURL, header)
 	if err != nil {
-		return nil, err
+		if resp != nil {
+			return nil, fmt.Errorf("websocket handshake failed - Status: %d, Error: %v, URL: %s", resp.StatusCode, err, url)
+		}
+		return nil, fmt.Errorf("websocket connection failed - Error: %v, URL: %s", err, url)
 	}
 
 	subdomainChan := make(chan string)
@@ -63,6 +100,7 @@ func Connect(url, address string) (*Tunnel, error) {
 				subdomainChan <- msg.Subdomain
 				close(subdomainChan)
 			case "request":
+				fmt.Printf("Received request: %s %s\n", msg.Request.Method, msg.Request.Path)
 				read, write := io.Pipe()
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				request, _ := http.NewRequestWithContext(ctx, msg.Request.Method, address+msg.Request.Path, read)
@@ -141,6 +179,7 @@ func Connect(url, address string) (*Tunnel, error) {
 					}
 				}(request, msg.RequestID, cancel)
 			case "close":
+				fmt.Printf("Closing request ID: %d\n", msg.RequestID)
 				if v, ok := t.activeRequests[msg.RequestID]; ok {
 					v.Close()
 					delete(t.activeRequests, msg.RequestID)
@@ -150,6 +189,7 @@ func Connect(url, address string) (*Tunnel, error) {
 					v.Write(msg.Data)
 				}
 			case "error":
+				fmt.Printf("Error received: %s\n", msg.Error)
 				c.Close()
 				closeChan <- errors.New(msg.Error)
 				break X
