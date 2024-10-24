@@ -13,8 +13,8 @@ import (
 
 var host string
 var insecure bool
-var port int
 var subdomain string
+var address string
 var authToken string
 
 var rootCmd = &cobra.Command{
@@ -54,7 +54,7 @@ var rootCmd = &cobra.Command{
 			RawQuery: query.Encode(),
 		}
 
-		t, err := tunnel.Connect(u.String(), fmt.Sprintf("http://localhost:%d", port), subdomain, authToken)
+		t, err := tunnel.Connect(u.String(), address, subdomain, authToken)
 		if err != nil {
 			fmt.Println(err)
 			os.Exit(1)
@@ -76,7 +76,7 @@ var rootCmd = &cobra.Command{
 			color.New(color.Bold, color.FgGreen).Printf("https://%s.%s", t.Subdomain, displayHost)
 		}
 		color.New(color.FgHiBlack).Print(" --> ")
-		color.New(color.Bold, color.FgCyan).Printf("http://localhost:%d\n\n", port)
+		color.New(color.Bold, color.FgCyan).Printf("%s\n\n", address)
 
 		if err = t.Wait(); err != nil {
 			fmt.Printf("\n❌ Disconnected from server. %s\n", color.New(color.FgHiBlack).Sprint(err))
@@ -95,10 +95,9 @@ func Execute() {
 func init() {
 	rootCmd.Flags().StringVar(&host, "host", "underpass.clb.li", "Host to connect to")
 	rootCmd.Flags().BoolVar(&insecure, "insecure", false, "[ADVANCED] don't tunnel over TLS")
-	rootCmd.Flags().IntVarP(&port, "port", "p", 0, "Port to tunnel to")
 	rootCmd.Flags().StringVarP(&subdomain, "subdomain", "s", "", "Request a custom subdomain")
+	rootCmd.Flags().StringVar(&address, "address", "http://localhost:8080", "Address to forward requests to")
 	rootCmd.Flags().StringVarP(&authToken, "token", "t", "", "Authentication token")
 
-	rootCmd.MarkFlagRequired("port")
 	rootCmd.Flags().MarkHidden("insecure")
 }

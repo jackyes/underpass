@@ -54,11 +54,12 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 		scheme = "wss"
 	}
 
-	// Ensure subdomain is clean
+	// Ensure subdomain and address are clean
 	cleanSubdomain := strings.Split(subdomain, "/")[0]
+	cleanAddress := strings.TrimSpace(address)
 	
-	// Construct the complete URL with the subdomain parameter
-	fullURL := fmt.Sprintf("%s://%s/start?subdomain=%s", scheme, cleanURL, cleanSubdomain)
+	// Construct the complete URL with the subdomain and address parameters
+	fullURL := fmt.Sprintf("%s://%s/start?subdomain=%s&address=%s", scheme, cleanURL, cleanSubdomain, cleanAddress)
 	fmt.Printf("Attempting to connect to: %s\n", fullURL)
 
 	// Create a custom dialer with debug logging
@@ -113,10 +114,32 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 				subdomainChan <- msg.Subdomain
 				close(subdomainChan)
 			case "request":
-				fmt.Printf("Received request: %s %s\n", msg.Request.Method, msg.Request.Path)
+				fmt.Printf("\nReceived request: %s %s\n", msg.Request.Method, msg.Request.Path)
 				read, write := io.Pipe()
 				ctx, cancel := context.WithTimeout(context.Background(), t.requestTimeout)
-				request, _ := http.NewRequestWithContext(ctx, msg.Request.Method, address+msg.Request.Path, read)
+				// Ensure the address has a protocol
+				if !strings.HasPrefix(address, "http://") && !strings.HasPrefix(address, "https://") {
+					address = "http://" + address
+				}
+				// Create the request with the original path
+				// Ensure proper URL construction
+				targetURL := address
+				if !strings.HasSuffix(targetURL, "/") && !strings.HasPrefix(msg.Request.Path, "/") {
+					targetURL += "/"
+				}
+				targetURL += msg.Request.Path
+				
+				request, err := http.NewRequestWithContext(ctx, msg.Request.Method, targetURL, read)
+				if err != nil {
+					fmt.Printf("Error creating request: %v\n", err)
+					writeMutex.Lock()
+					util.WriteMsgPack(c, models.ClientMessage{
+						Type:      "proxy_error",
+						RequestID: msg.RequestID,
+					})
+					writeMutex.Unlock()
+					continue
+				}
 				
 				t.requestsMutex.Lock()
 				t.activeRequests[msg.RequestID] = write
