@@ -15,10 +15,16 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// RequestData rappresenta i possibili tipi di dati in una richiesta
+type RequestData struct {
+	HTTPRequest *http.Request
+	RawData     []byte
+}
+
 type Request struct {
 	RequestID int
 	Close     bool
-	Data      interface{}
+	Data      *RequestData
 }
 
 type Tunnel struct {
@@ -166,32 +172,43 @@ func main() {
 					}
 					writeMutex.Unlock()
 				} else {
-					// Infer based on data type
-					switch data := req.Data.(type) {
-					case *http.Request:
-						marshalled := util.MarshalRequest(data)
+					// Handle request based on data type
+					if req.Data != nil {
+						if req.Data.HTTPRequest != nil {
+							marshalled, err := util.MarshalRequest(req.Data.HTTPRequest)
+							if err != nil {
+								log.Printf("Invalid request: %v", err)
+								writeMutex.Lock()
+								err = util.WriteMsgPack(c, models.ServerMessage{
+									Type:  "error",
+									Error: "Invalid request parameters",
+								})
+								writeMutex.Unlock()
+								continue
+							}
 
-						writeMutex.Lock()
-						err = util.WriteMsgPack(c, models.ServerMessage{
-							Type:      "request",
-							RequestID: req.RequestID,
-							Request:   marshalled,
-						})
-						if err != nil {
-							log.Println(err)
+							writeMutex.Lock()
+							err = util.WriteMsgPack(c, models.ServerMessage{
+								Type:      "request",
+								RequestID: req.RequestID,
+								Request:   marshalled,
+							})
+							if err != nil {
+								log.Println(err)
+							}
+							writeMutex.Unlock()
+						} else if req.Data.RawData != nil {
+							writeMutex.Lock()
+							err = util.WriteMsgPack(c, models.ServerMessage{
+								Type:      "data",
+								RequestID: req.RequestID,
+								Data:      req.Data.RawData,
+							})
+							if err != nil {
+								log.Println(err)
+							}
+							writeMutex.Unlock()
 						}
-						writeMutex.Unlock()
-					case []byte:
-						writeMutex.Lock()
-						err = util.WriteMsgPack(c, models.ServerMessage{
-							Type:      "data",
-							RequestID: req.RequestID,
-							Data:      data,
-						})
-						if err != nil {
-							log.Println(err)
-						}
-						writeMutex.Unlock()
 					}
 				}
 			}
@@ -205,7 +222,7 @@ func main() {
 			reqID := rand.Int()
 			t.reqChan <- Request{
 				RequestID: reqID,
-				Data:      r,
+				Data:      &RequestData{HTTPRequest: r},
 			}
 
 			// Pipe request body
@@ -219,7 +236,7 @@ func main() {
 						if n > 0 {
 							t.reqChan <- Request{
 								RequestID: reqID,
-								Data:      d[0:n],
+								Data:      &RequestData{RawData: d[0:n]},
 							}
 						}
 

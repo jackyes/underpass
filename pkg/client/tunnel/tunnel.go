@@ -23,11 +23,17 @@ type Tunnel struct {
 
 	closeChan chan error
 
-	activeRequests map[int]*io.PipeWriter
+	activeRequests   map[int]*io.PipeWriter
+	requestsMutex    sync.RWMutex
+	requestTimeouts  map[int]*time.Timer
+	cleanupInterval  time.Duration
+	requestTimeout   time.Duration
 }
 
 // Connect establishes a tunnel connection with optional authentication
 func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
+	const defaultCleanupInterval = 5 * time.Minute
+	const defaultRequestTimeout = 30 * time.Second
 	header := http.Header{}
 	if authToken != "" {
 		header.Add("Authorization", "Bearer "+authToken)
@@ -73,9 +79,16 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 	closeChan := make(chan error)
 
 	t := &Tunnel{
-		closeChan:      closeChan,
-		activeRequests: make(map[int]*io.PipeWriter),
+		closeChan:       closeChan,
+		activeRequests:  make(map[int]*io.PipeWriter),
+		requestsMutex:   sync.RWMutex{},
+		requestTimeouts: make(map[int]*time.Timer),
+		cleanupInterval: defaultCleanupInterval,
+		requestTimeout:  defaultRequestTimeout,
 	}
+
+	// Avvia il goroutine di pulizia periodica
+	go t.periodicCleanup()
 
 	writeMutex := sync.Mutex{}
 
@@ -102,9 +115,16 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 			case "request":
 				fmt.Printf("Received request: %s %s\n", msg.Request.Method, msg.Request.Path)
 				read, write := io.Pipe()
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				ctx, cancel := context.WithTimeout(context.Background(), t.requestTimeout)
 				request, _ := http.NewRequestWithContext(ctx, msg.Request.Method, address+msg.Request.Path, read)
+				
+				t.requestsMutex.Lock()
 				t.activeRequests[msg.RequestID] = write
+				timer := time.AfterFunc(t.requestTimeout, func() {
+					t.cleanupRequest(msg.RequestID)
+				})
+				t.requestTimeouts[msg.RequestID] = timer
+				t.requestsMutex.Unlock()
 
 				request.Header = msg.Request.Headers
 				request.Host = msg.Request.Host
@@ -208,4 +228,40 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 
 func (t *Tunnel) Wait() error {
 	return <-t.closeChan
+}
+
+// cleanupRequest rimuove una richiesta specifica e le sue risorse associate
+func (t *Tunnel) cleanupRequest(requestID int) {
+	t.requestsMutex.Lock()
+	defer t.requestsMutex.Unlock()
+
+	if writer, exists := t.activeRequests[requestID]; exists {
+		writer.Close()
+		delete(t.activeRequests, requestID)
+	}
+	
+	if timer, exists := t.requestTimeouts[requestID]; exists {
+		timer.Stop()
+		delete(t.requestTimeouts, requestID)
+	}
+}
+
+// periodicCleanup esegue una pulizia periodica delle richieste scadute
+func (t *Tunnel) periodicCleanup() {
+	ticker := time.NewTicker(t.cleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-t.closeChan:
+			return
+		case <-ticker.C:
+			t.requestsMutex.Lock()
+			for requestID := range t.activeRequests {
+				// Forza la pulizia delle richieste vecchie
+				t.cleanupRequest(requestID)
+			}
+			t.requestsMutex.Unlock()
+		}
+	}
 }

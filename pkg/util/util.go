@@ -9,13 +9,24 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
-func MarshalRequest(r *http.Request) models.Request {
+func MarshalRequest(r *http.Request) (models.Request, error) {
+	// Valida i campi prima di creare la Request
+	if !ValidatePath(r.RequestURI) {
+		return models.Request{}, fmt.Errorf("invalid path")
+	}
+	if !ValidateMethod(r.Method) {
+		return models.Request{}, fmt.Errorf("invalid HTTP method")
+	}
+	if !ValidateHost(r.Host) {
+		return models.Request{}, fmt.Errorf("invalid host")
+	}
+
 	return models.Request{
 		Headers: r.Header,
 		Path:    r.RequestURI,
 		Method:  r.Method,
 		Host:    r.Host,
-	}
+	}, nil
 }
 
 func MarshalResponse(r *http.Response) models.Response {
