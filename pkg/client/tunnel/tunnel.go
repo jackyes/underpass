@@ -20,20 +20,27 @@ import (
 type Tunnel struct {
 	Subdomain string
 	Address   string
+	URL       string
+	AuthToken string
 
 	closeChan chan error
 
-	activeRequests   map[int]*io.PipeWriter
-	requestsMutex    sync.RWMutex
-	requestTimeouts  map[int]*time.Timer
-	cleanupInterval  time.Duration
-	requestTimeout   time.Duration
+	activeRequests    map[int]*io.PipeWriter
+	requestsMutex     sync.RWMutex
+	requestTimeouts   map[int]*time.Timer
+	cleanupInterval   time.Duration
+	requestTimeout    time.Duration
+	reconnectAttempts int
+	maxRetries       int
+	reconnectDelay   time.Duration
 }
 
 // Connect establishes a tunnel connection with optional authentication
 func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 	const defaultCleanupInterval = 5 * time.Minute
 	const defaultRequestTimeout = 30 * time.Second
+	const defaultMaxRetries = 5
+	const defaultReconnectDelay = 5 * time.Second
 	header := http.Header{}
 	if authToken != "" {
 		header.Add("Authorization", "Bearer "+authToken)
@@ -88,7 +95,6 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 		requestTimeout:  defaultRequestTimeout,
 	}
 
-	// Avvia il goroutine di pulizia periodica
 	go t.periodicCleanup()
 
 	writeMutex := sync.Mutex{}
@@ -243,6 +249,13 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 	select {
 	case subdomain := <-subdomainChan:
 		t.Subdomain = subdomain
+		t.URL = url
+		t.AuthToken = authToken
+		t.maxRetries = defaultMaxRetries
+		t.reconnectDelay = defaultReconnectDelay
+		
+		go t.handleReconnection()
+		
 		return t, nil
 	case err = <-closeChan:
 		return nil, err
@@ -253,7 +266,39 @@ func (t *Tunnel) Wait() error {
 	return <-t.closeChan
 }
 
-// cleanupRequest rimuove una richiesta specifica e le sue risorse associate
+func (t *Tunnel) handleReconnection() {
+	for {
+		err := <-t.closeChan
+		if err == nil {
+			return
+		}
+
+		fmt.Printf("\n❌ Disconnected from server: %s\n", err)
+		
+		// Attempt reconnection
+		for attempt := 1; attempt <= t.maxRetries; attempt++ {
+			fmt.Printf("Reconnection attempt %d/%d...\n", attempt, t.maxRetries)
+			
+			newTunnel, err := Connect(t.URL, t.Address, t.Subdomain, t.AuthToken)
+			if err == nil {
+				fmt.Printf("✅ Reconnection successful!\n")
+				t.closeChan = newTunnel.closeChan
+				t.activeRequests = newTunnel.activeRequests
+				t.requestTimeouts = newTunnel.requestTimeouts
+				return
+			}
+
+			if attempt < t.maxRetries {
+				fmt.Printf("Waiting %s before next attempt...\n", t.reconnectDelay)
+				time.Sleep(t.reconnectDelay)
+			}
+		}
+
+		fmt.Printf("❌ Unable to reconnect after %d attempts. The tunnel will be closed.\n", t.maxRetries)
+		return
+	}
+}
+
 func (t *Tunnel) cleanupRequest(requestID int) {
 	t.requestsMutex.Lock()
 	defer t.requestsMutex.Unlock()
@@ -269,7 +314,6 @@ func (t *Tunnel) cleanupRequest(requestID int) {
 	}
 }
 
-// periodicCleanup esegue una pulizia periodica delle richieste scadute
 func (t *Tunnel) periodicCleanup() {
 	ticker := time.NewTicker(t.cleanupInterval)
 	defer ticker.Stop()
@@ -281,7 +325,6 @@ func (t *Tunnel) periodicCleanup() {
 		case <-ticker.C:
 			t.requestsMutex.Lock()
 			for requestID := range t.activeRequests {
-				// Forza la pulizia delle richieste vecchie
 				t.cleanupRequest(requestID)
 			}
 			t.requestsMutex.Unlock()
