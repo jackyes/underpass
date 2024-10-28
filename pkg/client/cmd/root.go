@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"time"
 
 	"github.com/jackyes/underpass/pkg/client/tunnel"
 	"github.com/matoous/go-nanoid/v2"
@@ -16,6 +17,8 @@ var insecure bool
 var subdomain string
 var address string
 var authToken string
+var maxRetries int
+var reconnectDelay time.Duration
 
 var rootCmd = &cobra.Command{
 	Use:   "underpass",
@@ -98,6 +101,8 @@ func init() {
 	rootCmd.Flags().StringVarP(&subdomain, "subdomain", "s", "", "Request a custom subdomain")
 	rootCmd.Flags().StringVar(&address, "address", "http://localhost:8080", "Address to forward requests to")
 	rootCmd.Flags().StringVarP(&authToken, "token", "t", "", "Authentication token")
+	rootCmd.Flags().IntVar(&maxRetries, "max-retries", 5, "Maximum number of reconnection attempts")
+	rootCmd.Flags().DurationVar(&reconnectDelay, "reconnect-delay", 5*time.Second, "Delay between reconnection attempts")
 
 	rootCmd.Flags().MarkHidden("insecure")
 }
