@@ -76,11 +76,11 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 
 	fmt.Printf("Headers: %v\n", header)
 	c, resp, err := dialer.Dial(fullURL, header)
-	if err != nil {
+	if err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
 		if resp != nil {
-			return nil, fmt.Errorf("websocket handshake failed - Status: %d, Error: %v, URL: %s", resp.StatusCode, err, url)
+			return nil, fmt.Errorf("websocket handshake failed - Status: %d, Error: %v, URL: %s", resp.StatusCode, err, fullURL)
 		}
-		return nil, fmt.Errorf("websocket connection failed - Error: %v, URL: %s", err, url)
+		return nil, fmt.Errorf("websocket connection failed - Error: %v, URL: %s", err, fullURL)
 	}
 
 	subdomainChan := make(chan string)

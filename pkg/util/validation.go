@@ -7,7 +7,7 @@ import (
 )
 
 var (
-	// Regex per validare il path
+	// Regex to validate the path
 	validPathRegex = regexp.MustCompile(`^[a-zA-Z0-9\-\_\/\.\?\=\&\%\+]*$`)
 	// Metodi HTTP consentiti
 	validMethods = map[string]bool{
@@ -21,23 +21,23 @@ var (
 	}
 )
 
-// ValidatePath verifica che il path sia sicuro
+	// ValidatePath checks if the path is secure
 func ValidatePath(path string) bool {
-	// Previene path traversal
-	if strings.Contains(path, "..") {
+	// Prevents path traversal and ensures the path starts with a slash
+	if strings.Contains(path, "..") || !strings.HasPrefix(path, "/") {
 		return false
 	}
-	// Verifica che contenga solo caratteri consentiti
+	// Checks that it contains only allowed characters
 	return validPathRegex.MatchString(path)
 }
 
-// ValidateMethod verifica che il metodo HTTP sia consentito
+	// ValidateMethod checks if the HTTP method is allowed
 func ValidateMethod(method string) bool {
 	return validMethods[strings.ToUpper(method)]
 }
 
-// ValidateHost verifica che l'host sia valido
+	// ValidateHost checks if the host is valid
 func ValidateHost(host string) bool {
-	// Previene header injection
-	return !strings.ContainsAny(host, "\r\n")
+	// Prevents header injection and ensures the host is not empty
+	return host != "" && !strings.ContainsAny(host, "\r\n")
 }

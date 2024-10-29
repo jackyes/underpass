@@ -10,7 +10,7 @@ import (
 )
 
 func MarshalRequest(r *http.Request) (models.Request, error) {
-	// Valida i campi prima di creare la Request
+	// Validates fields before creating the Request
 	if !ValidatePath(r.RequestURI) {
 		return models.Request{}, fmt.Errorf("invalid path")
 	}
@@ -36,16 +36,16 @@ func MarshalResponse(r *http.Response) models.Response {
 	}
 }
 
-// Writes a MessagePack-encoded binary string to a WebSocket connection
+	// Writes a MessagePack-encoded binary string to a WebSocket connection
 func WriteMsgPack(c *websocket.Conn, v interface{}) error {
 	marshalled, err := msgpack.Marshal(v)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to write message: %w", err)
 	}
 
 	err = c.WriteMessage(websocket.BinaryMessage, marshalled)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to read message: %w", err)
 	}
 
 	return nil
