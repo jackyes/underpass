@@ -36,11 +36,13 @@ Usage:
   underpass [flags]
 
 Flags:
-      --address string     Address to forward requests to (default "http://localhost:8080")
-  -h, --help               help for underpass
-      --host string        Host to connect to (default "underpass.clb.li")
-  -s, --subdomain string   Request a custom subdomain
-  -t, --token string       Authentication token
+      --address string             Address to forward requests to (default "http://localhost:8080")
+  -h, --help                       help for underpass
+      --host string                Host to connect to (default "underpass.clb.li")
+      --max-retries int            Maximum number of reconnection attempts (default 5)
+      --reconnect-delay duration   Delay between reconnection attempts (default 5s)
+  -s, --subdomain string           Request a custom subdomain
+  -t, --token string               Authentication token
 
 
 underpass --address <ip>:<port> --host <host here> -s <optional subdomain> -t <your_secure_key>
