@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -8,12 +9,11 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"context"
 
-	"github.com/jackyes/underpass/pkg/models"
-	"github.com/jackyes/underpass/pkg/util"
 	"github.com/fatih/color"
 	"github.com/gorilla/websocket"
+	"github.com/jackyes/underpass/pkg/models"
+	"github.com/jackyes/underpass/pkg/util"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
@@ -23,10 +23,10 @@ type Tunnel struct {
 	URL       string
 	AuthToken string
 
-	closeChan     chan error
-	closeOnce     sync.Once
-	closeMutex    sync.Mutex
-	isChanClosed  bool
+	closeChan    chan error
+	closeOnce    sync.Once
+	closeMutex   sync.Mutex
+	isChanClosed bool
 
 	activeRequests    map[int]*io.PipeWriter
 	requestsMutex     sync.RWMutex
@@ -34,14 +34,14 @@ type Tunnel struct {
 	cleanupInterval   time.Duration
 	requestTimeout    time.Duration
 	reconnectAttempts int
-	maxRetries       int
-	reconnectDelay   time.Duration
+	maxRetries        int
+	reconnectDelay    time.Duration
 }
 
 // Connect establishes a tunnel connection with optional authentication
 func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 	const defaultCleanupInterval = 5 * time.Minute
-	const defaultRequestTimeout = 30 * time.Second
+	const defaultRequestTimeout = 600 * time.Second
 	const defaultMaxRetries = 5
 	const defaultReconnectDelay = 5 * time.Second
 	header := http.Header{}
@@ -57,7 +57,7 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 	} else if strings.HasPrefix(cleanURL, "wss://") {
 		cleanURL = strings.TrimPrefix(cleanURL, "wss://")
 	}
-	
+
 	// Determine if we should use wss:// based on the input
 	scheme := "ws"
 	if strings.HasPrefix(url, "https://") || strings.HasPrefix(url, "wss://") {
@@ -67,7 +67,7 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 	// Ensure subdomain and address are clean
 	cleanSubdomain := strings.Split(subdomain, "/")[0]
 	cleanAddress := strings.TrimSpace(address)
-	
+
 	// Construct the complete URL with the subdomain and address parameters
 	fullURL := fmt.Sprintf("%s://%s/start?subdomain=%s&address=%s", scheme, cleanURL, cleanSubdomain, cleanAddress)
 	fmt.Printf("Attempting to connect to: %s\n", fullURL)
@@ -96,8 +96,8 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 		requestTimeouts: make(map[int]*time.Timer),
 		cleanupInterval: defaultCleanupInterval,
 		requestTimeout:  defaultRequestTimeout,
-		maxRetries:     defaultMaxRetries,
-		reconnectDelay: defaultReconnectDelay,
+		maxRetries:      defaultMaxRetries,
+		reconnectDelay:  defaultReconnectDelay,
 	}
 
 	go t.periodicCleanup()
@@ -142,7 +142,7 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 					targetURL += "/"
 				}
 				targetURL += msg.Request.Path
-				
+
 				request, err := http.NewRequestWithContext(ctx, msg.Request.Method, targetURL, read)
 				if err != nil {
 					fmt.Printf("Error creating request: %v\n", err)
@@ -154,7 +154,7 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 					writeMutex.Unlock()
 					continue
 				}
-				
+
 				t.requestsMutex.Lock()
 				t.activeRequests[msg.RequestID] = write
 				timer := time.AfterFunc(t.requestTimeout, func() {
@@ -261,9 +261,9 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 		t.AuthToken = authToken
 		t.maxRetries = defaultMaxRetries
 		t.reconnectDelay = defaultReconnectDelay
-		
+
 		go t.handleReconnection()
-		
+
 		return t, nil
 	case err = <-closeChan:
 		return nil, err
@@ -293,13 +293,13 @@ func (t *Tunnel) handleReconnection() {
 		if err == nil {
 			return
 		}
-		
+
 		fmt.Printf("\n❌ Disconnected from server: %s\n", err)
-		
+
 		// Attempt reconnection
 		for attempt := 1; attempt <= t.maxRetries; attempt++ {
 			fmt.Printf("Reconnection attempt %d/%d...\n", attempt, t.maxRetries)
-			
+
 			newTunnel, err := Connect(t.URL, t.Address, t.Subdomain, t.AuthToken)
 			if err == nil {
 				fmt.Printf("✅ Reconnection successful!\n")
@@ -338,7 +338,7 @@ func (t *Tunnel) cleanupRequest(requestID int) {
 		writer.Close()
 		delete(t.activeRequests, requestID)
 	}
-	
+
 	if timer, exists := t.requestTimeouts[requestID]; exists {
 		timer.Stop()
 		delete(t.requestTimeouts, requestID)
