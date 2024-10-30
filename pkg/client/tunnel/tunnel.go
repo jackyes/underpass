@@ -23,7 +23,10 @@ type Tunnel struct {
 	URL       string
 	AuthToken string
 
-	closeChan chan error
+	closeChan     chan error
+	closeOnce     sync.Once
+	closeMutex    sync.Mutex
+	isChanClosed  bool
 
 	activeRequests    map[int]*io.PipeWriter
 	requestsMutex     sync.RWMutex
@@ -269,7 +272,14 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 
 func (t *Tunnel) Wait() error {
 	err := <-t.closeChan
-	close(t.closeChan) // Ensure channel is closed
+	t.closeMutex.Lock()
+	if !t.isChanClosed {
+		t.closeOnce.Do(func() {
+			close(t.closeChan)
+			t.isChanClosed = true
+		})
+	}
+	t.closeMutex.Unlock()
 	return err
 }
 
@@ -306,9 +316,16 @@ func (t *Tunnel) handleReconnection() {
 		}
 
 		fmt.Printf("❌ Unable to reconnect after %d attempts. The tunnel will be closed.\n", t.maxRetries)
-		// Signal final error and close the channel
-		t.closeChan <- err
-		close(t.closeChan)
+		// Signal final error and safely close the channel
+		t.closeMutex.Lock()
+		if !t.isChanClosed {
+			t.closeChan <- err
+			t.closeOnce.Do(func() {
+				close(t.closeChan)
+				t.isChanClosed = true
+			})
+		}
+		t.closeMutex.Unlock()
 		return
 	}
 }
