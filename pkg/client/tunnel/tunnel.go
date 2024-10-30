@@ -84,7 +84,7 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 	}
 
 	subdomainChan := make(chan string)
-	closeChan := make(chan error)
+	closeChan := make(chan error, 1) // Buffered channel to prevent blocking
 
 	t := &Tunnel{
 		closeChan:       closeChan,
@@ -93,6 +93,8 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 		requestTimeouts: make(map[int]*time.Timer),
 		cleanupInterval: defaultCleanupInterval,
 		requestTimeout:  defaultRequestTimeout,
+		maxRetries:     defaultMaxRetries,
+		reconnectDelay: defaultReconnectDelay,
 	}
 
 	go t.periodicCleanup()
@@ -106,8 +108,11 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 
 			_, m, err := c.ReadMessage()
 			if err != nil {
-				closeChan <- err
-				close(closeChan)
+				select {
+				case closeChan <- err:
+				default:
+					// Channel is already closed or full
+				}
 				break
 			}
 			err = msgpack.Unmarshal(m, &msg)
@@ -263,16 +268,22 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 }
 
 func (t *Tunnel) Wait() error {
-	return <-t.closeChan
+	err := <-t.closeChan
+	close(t.closeChan) // Ensure channel is closed
+	return err
 }
 
 func (t *Tunnel) handleReconnection() {
 	for {
-		err := <-t.closeChan
+		err, ok := <-t.closeChan
+		if !ok {
+			// Channel was closed, exit gracefully
+			return
+		}
 		if err == nil {
 			return
 		}
-
+		
 		fmt.Printf("\n❌ Disconnected from server: %s\n", err)
 		
 		// Attempt reconnection
@@ -295,6 +306,9 @@ func (t *Tunnel) handleReconnection() {
 		}
 
 		fmt.Printf("❌ Unable to reconnect after %d attempts. The tunnel will be closed.\n", t.maxRetries)
+		// Signal final error and close the channel
+		t.closeChan <- err
+		close(t.closeChan)
 		return
 	}
 }

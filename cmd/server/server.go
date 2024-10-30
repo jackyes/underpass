@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jackyes/underpass/pkg/models"
 	"github.com/jackyes/underpass/pkg/util"
@@ -130,6 +131,17 @@ func main() {
 					log.Printf("Connection closed for subdomain: %s\n", subdomain)
 					close(closeChan)
 					c.Close()
+					
+					// Clean up all listeners before removing tunnel
+					t.listenersMutex.Lock()
+					for id, listener := range t.listeners {
+						if listener != nil {
+							close(listener)
+						}
+						delete(t.listeners, id)
+					}
+					t.listenersMutex.Unlock()
+					
 					delete(tunnels, subdomain)
 					log.Printf("Tunnel removed for subdomain: %s\n", subdomain)
 					break
@@ -144,7 +156,22 @@ func main() {
 				}
 
 				t.listenersMutex.RLock()
-				t.listeners[message.RequestID] <- message
+				if listener, ok := t.listeners[message.RequestID]; ok {
+					select {
+					case listener <- message:
+					case <-time.After(2 * time.Second):
+						// If we can't send within 2 seconds, assume the listener is stuck
+						t.listenersMutex.RUnlock()
+						t.listenersMutex.Lock()
+						if l, stillExists := t.listeners[message.RequestID]; stillExists && l == listener && l != nil {
+							close(listener)
+							delete(t.listeners, message.RequestID)
+							log.Printf("Cleaned up stuck listener for request %d (subdomain: %s)", message.RequestID, subdomain)
+						}
+						t.listenersMutex.Unlock()
+						continue
+					}
+				}
 				t.listenersMutex.RUnlock()
 			}
 		}()
@@ -177,14 +204,19 @@ func main() {
 						if req.Data.HTTPRequest != nil {
 							marshalled, err := util.MarshalRequest(req.Data.HTTPRequest)
 							if err != nil {
-								log.Printf("Invalid request: %v", err)
-								writeMutex.Lock()
-								err = util.WriteMsgPack(c, models.ServerMessage{
-									Type:  "error",
-									Error: "Invalid request parameters",
-								})
-								writeMutex.Unlock()
-								continue
+								log.Printf("Invalid request for path '%s': %v", req.Data.HTTPRequest.RequestURI, err)
+								select {
+								case <-closeChan:
+									return
+								default:
+									writeMutex.Lock()
+									err = util.WriteMsgPack(c, models.ServerMessage{
+										Type:  "error",
+										Error: "Invalid request parameters",
+									})
+									writeMutex.Unlock()
+									continue
+								}
 							}
 
 							writeMutex.Lock()
