@@ -57,6 +57,7 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 	} else if strings.HasPrefix(cleanURL, "wss://") {
 		cleanURL = strings.TrimPrefix(cleanURL, "wss://")
 	}
+	cleanURL = strings.Split(cleanURL, "/")[0]
 
 	// Determine if we should use wss:// based on the input
 	scheme := "ws"
