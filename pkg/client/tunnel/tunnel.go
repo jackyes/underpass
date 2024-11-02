@@ -99,6 +99,7 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 		requestTimeout:  defaultRequestTimeout,
 		maxRetries:      defaultMaxRetries,
 		reconnectDelay:  defaultReconnectDelay,
+		Address:         cleanAddress,  // Store the clean address
 	}
 
 	go t.periodicCleanup()
@@ -304,9 +305,11 @@ func (t *Tunnel) handleReconnection() {
 			newTunnel, err := Connect(t.URL, t.Address, t.Subdomain, t.AuthToken)
 			if err == nil {
 				fmt.Printf("✅ Reconnection successful!\n")
+				// Copiamo tutti i campi necessari dal nuovo tunnel
 				t.closeChan = newTunnel.closeChan
 				t.activeRequests = newTunnel.activeRequests
 				t.requestTimeouts = newTunnel.requestTimeouts
+				t.Address = newTunnel.Address
 				return
 			}
 
