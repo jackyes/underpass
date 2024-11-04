@@ -6,9 +6,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/jackyes/underpass/pkg/client/tunnel"
-	"github.com/matoous/go-nanoid/v2"
 	"github.com/fatih/color"
+	"github.com/jackyes/underpass/pkg/client/tunnel"
+	gonanoid "github.com/matoous/go-nanoid/v2"
 	"github.com/spf13/cobra"
 )
 

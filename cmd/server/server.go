@@ -10,13 +10,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jackyes/underpass/pkg/models"
-	"github.com/jackyes/underpass/pkg/util"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
+	"github.com/jackyes/underpass/pkg/models"
+	"github.com/jackyes/underpass/pkg/util"
 )
 
-// RequestData rappresenta i possibili tipi di dati in una richiesta
+// RequestData represents the possible types of data in a request
 type RequestData struct {
 	HTTPRequest *http.Request
 	RawData     []byte
@@ -53,7 +53,7 @@ func main() {
 	r.Handle("/", http.RedirectHandler("https://github.com/jackyes/underpass", http.StatusTemporaryRedirect)).Host(*host)
 
 	r.HandleFunc("/start", func(rw http.ResponseWriter, r *http.Request) {
-		// Verifica del token di autenticazione
+		// Verify the authentication token
 		if *authToken != "" {
 			authHeader := r.Header.Get("Authorization")
 			if !strings.HasPrefix(authHeader, "Bearer ") || strings.TrimPrefix(authHeader, "Bearer ") != *authToken {
@@ -131,7 +131,7 @@ func main() {
 					log.Printf("Connection closed for subdomain: %s\n", subdomain)
 					close(closeChan)
 					c.Close()
-					
+
 					// Clean up all listeners before removing tunnel
 					t.listenersMutex.Lock()
 					for id, listener := range t.listeners {
@@ -141,7 +141,7 @@ func main() {
 						delete(t.listeners, id)
 					}
 					t.listenersMutex.Unlock()
-					
+
 					delete(tunnels, subdomain)
 					log.Printf("Tunnel removed for subdomain: %s\n", subdomain)
 					break

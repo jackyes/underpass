@@ -305,7 +305,7 @@ func (t *Tunnel) handleReconnection() {
 			newTunnel, err := Connect(t.URL, t.Address, t.Subdomain, t.AuthToken)
 			if err == nil {
 				fmt.Printf("✅ Reconnection successful!\n")
-				// Copiamo tutti i campi necessari dal nuovo tunnel
+				// Copy all necessary fields from the new tunnel
 				t.closeChan = newTunnel.closeChan
 				t.activeRequests = newTunnel.activeRequests
 				t.requestTimeouts = newTunnel.requestTimeouts

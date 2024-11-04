@@ -11,16 +11,16 @@ const (
 	ReadTimeout      = 30 * time.Second
 	WriteTimeout     = 30 * time.Second
 	
-	// Limiti di tentativi
+	// Attempt limits
 	MaxReconnectAttempts = 5
 	MaxRequestRetries   = 3
 	
-	// Dimensioni buffer
+	// Buffer sizes
 	ReadBufferSize     = 1024
 	WriteBufferSize    = 1024
 )
 
-// ConfigureTLS configura le opzioni TLS di base
+// ConfigureTLS configures basic TLS options
 func ConfigureTLS(config *tls.Config) {
 	config.MinVersion = tls.VersionTLS12
 	config.CipherSuites = []uint16{

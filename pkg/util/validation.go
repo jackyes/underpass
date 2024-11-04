@@ -8,7 +8,7 @@ import (
 var (
 	// Regex to validate the path
 	//validPathRegex = regexp.MustCompile(`^[a-zA-Z0-9\-\_\/\.\?\=\&\%\+\@\(\)]*$`)
-	// Metodi HTTP consentiti
+	// Allowed HTTP methods
 	validMethods = map[string]bool{
 		http.MethodGet:     true,
 		http.MethodPost:    true,
