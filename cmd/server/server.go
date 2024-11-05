@@ -137,8 +137,8 @@ func main() {
 					for id, listener := range t.listeners {
 						if listener != nil {
 							close(listener)
+							delete(t.listeners, id)
 						}
-						delete(t.listeners, id)
 					}
 					t.listenersMutex.Unlock()
 

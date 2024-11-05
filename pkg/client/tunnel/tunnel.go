@@ -275,13 +275,15 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 func (t *Tunnel) Wait() error {
 	err := <-t.closeChan
 	t.closeMutex.Lock()
+	defer t.closeMutex.Unlock()
+	
+	// If the channel is not already closed, close it
 	if !t.isChanClosed {
 		t.closeOnce.Do(func() {
 			close(t.closeChan)
 			t.isChanClosed = true
 		})
 	}
-	t.closeMutex.Unlock()
 	return err
 }
 
@@ -298,6 +300,7 @@ func (t *Tunnel) handleReconnection() {
 
 		fmt.Printf("\n❌ Disconnected from server: %s\n", err)
 
+		var lastError error
 		// Attempt reconnection
 		for attempt := 1; attempt <= t.maxRetries; attempt++ {
 			fmt.Printf("Reconnection attempt %d/%d...\n", attempt, t.maxRetries)
@@ -312,7 +315,8 @@ func (t *Tunnel) handleReconnection() {
 				t.Address = newTunnel.Address
 				return
 			}
-
+			
+			lastError = err
 			if attempt < t.maxRetries {
 				fmt.Printf("Waiting %s before next attempt...\n", t.reconnectDelay)
 				time.Sleep(t.reconnectDelay)
@@ -320,10 +324,15 @@ func (t *Tunnel) handleReconnection() {
 		}
 
 		fmt.Printf("❌ Unable to reconnect after %d attempts. The tunnel will be closed.\n", t.maxRetries)
-		// Signal final error and safely close the channel
+		
+		// Signal the final error and close safely
 		t.closeMutex.Lock()
 		if !t.isChanClosed {
-			t.closeChan <- err
+			select {
+			case t.closeChan <- lastError:
+			default:
+				// The channel is full or closed, proceed with closure
+			}
 			t.closeOnce.Do(func() {
 				close(t.closeChan)
 				t.isChanClosed = true
