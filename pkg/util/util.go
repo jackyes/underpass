@@ -11,9 +11,14 @@ import (
 )
 
 // msgPackPool is a sync.Pool for reusing byte slices to reduce memory allocations.
+const (
+	initialBufferSize = 1024
+	maxBufferSize     = 64 * 1024 // 64KB
+)
+
 var msgPackPool = &sync.Pool{
 	New: func() interface{} {
-		return make([]byte, 0, 1024) // Initial capacity
+		return make([]byte, 0, initialBufferSize)
 	},
 }
 
@@ -48,19 +53,32 @@ func MarshalResponse(r *http.Response) models.Response {
 
 // WriteMsgPack marshals the given data into MessagePack format and writes it to the WebSocket connection.
 func WriteMsgPack(c *websocket.Conn, v interface{}) error {
-	b := msgPackPool.Get().([]byte)
-	defer msgPackPool.Put(b)
+	// Get buffer from pool
+	buf := msgPackPool.Get().([]byte)
+	defer func() {
+		// Only keep reasonably sized buffers in pool
+		if cap(buf) <= maxBufferSize {
+			buf = buf[:0] // Reset slice
+			msgPackPool.Put(buf)
+		}
+	}()
 
-	b = b[:0] // Reset the slice
-
+	// Marshal data
 	marshalled, err := msgpack.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("failed to marshal data: %w", err)
 	}
 
-	b = append(b, marshalled...)
+	// If marshalled data is larger than current buffer capacity,
+	// allocate a new slice with exact needed capacity
+	if len(marshalled) > cap(buf) {
+		buf = make([]byte, len(marshalled))
+	} else {
+		buf = buf[:len(marshalled)]
+	}
+	copy(buf, marshalled)
 
-	err = c.WriteMessage(websocket.BinaryMessage, b)
+	err = c.WriteMessage(websocket.BinaryMessage, buf)
 	if err != nil {
 		return fmt.Errorf("failed to write message: %w", err)
 	}

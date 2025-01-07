@@ -27,6 +27,8 @@ type Tunnel struct {
 	closeOnce    sync.Once
 	closeMutex   sync.Mutex
 	isChanClosed bool
+	closeCond    *sync.Cond
+	closeNotify  chan struct{} // Per notificare la chiusura
 
 	activeRequests    map[int]*io.PipeWriter
 	requestsMutex     sync.RWMutex
@@ -92,6 +94,7 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 
 	t := &Tunnel{
 		closeChan:       closeChan,
+		closeNotify:     make(chan struct{}),
 		activeRequests:  make(map[int]*io.PipeWriter),
 		requestsMutex:   sync.RWMutex{},
 		requestTimeouts: make(map[int]*time.Timer),
@@ -99,7 +102,7 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 		requestTimeout:  defaultRequestTimeout,
 		maxRetries:      defaultMaxRetries,
 		reconnectDelay:  defaultReconnectDelay,
-		Address:         cleanAddress,  // Store the clean address
+		Address:         cleanAddress, // Store the clean address
 	}
 
 	go t.periodicCleanup()
@@ -139,11 +142,13 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 				}
 				// Create the request with the original path
 				// Ensure proper URL construction
+				t.requestsMutex.Lock()
 				targetURL := address
 				if !strings.HasSuffix(targetURL, "/") && !strings.HasPrefix(msg.Request.Path, "/") {
 					targetURL += "/"
 				}
 				targetURL += msg.Request.Path
+				t.requestsMutex.Unlock()
 
 				request, err := http.NewRequestWithContext(ctx, msg.Request.Method, targetURL, read)
 				if err != nil {
@@ -273,73 +278,102 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 }
 
 func (t *Tunnel) Wait() error {
-	err := <-t.closeChan
 	t.closeMutex.Lock()
 	defer t.closeMutex.Unlock()
-	
-	// If the channel is not already closed, close it
-	if !t.isChanClosed {
+
+	select {
+	case err, ok := <-t.closeChan:
+		if !ok {
+			// Canale già chiuso
+			return nil
+		}
+
+		// Chiudi in modo sicuro
 		t.closeOnce.Do(func() {
 			close(t.closeChan)
 			t.isChanClosed = true
+			if t.closeNotify != nil {
+				close(t.closeNotify)
+			}
 		})
+		return err
+	case <-t.closeNotify:
+		return nil
 	}
-	return err
 }
 
 func (t *Tunnel) handleReconnection() {
+	t.closeMutex.Lock()
+	defer t.closeMutex.Unlock()
+
 	for {
-		err, ok := <-t.closeChan
-		if !ok {
-			// Channel was closed, exit gracefully
-			return
-		}
-		if err == nil {
-			return
-		}
-
-		fmt.Printf("\n❌ Disconnected from server: %s\n", err)
-
-		var lastError error
-		// Attempt reconnection
-		for attempt := 1; attempt <= t.maxRetries; attempt++ {
-			fmt.Printf("Reconnection attempt %d/%d...\n", attempt, t.maxRetries)
-
-			newTunnel, err := Connect(t.URL, t.Address, t.Subdomain, t.AuthToken)
-			if err == nil {
-				fmt.Printf("✅ Reconnection successful!\n")
-				// Copy all necessary fields from the new tunnel
-				t.closeChan = newTunnel.closeChan
-				t.activeRequests = newTunnel.activeRequests
-				t.requestTimeouts = newTunnel.requestTimeouts
-				t.Address = newTunnel.Address
+		select {
+		case err, ok := <-t.closeChan:
+			if !ok {
+				// Channel was closed, exit gracefully
 				return
 			}
-			
-			lastError = err
-			if attempt < t.maxRetries {
-				fmt.Printf("Waiting %s before next attempt...\n", t.reconnectDelay)
-				time.Sleep(t.reconnectDelay)
+			if err == nil {
+				return
 			}
-		}
 
-		fmt.Printf("❌ Unable to reconnect after %d attempts. The tunnel will be closed.\n", t.maxRetries)
-		
-		// Signal the final error and close safely
-		t.closeMutex.Lock()
-		if !t.isChanClosed {
-			select {
-			case t.closeChan <- lastError:
-			default:
-				// The channel is full or closed, proceed with closure
+			fmt.Printf("\n❌ Disconnected from server: %s\n", err)
+
+			// Attempt reconnection
+			var lastError error
+			for attempt := 1; attempt <= t.maxRetries; attempt++ {
+				fmt.Printf("Reconnection attempt %d/%d...\n", attempt, t.maxRetries)
+
+				newTunnel, err := Connect(t.URL, t.Address, t.Subdomain, t.AuthToken)
+				if err == nil {
+					fmt.Printf("✅ Reconnection successful!\n")
+					// Copy all necessary fields from the new tunnel
+					t.closeChan = newTunnel.closeChan
+					t.activeRequests = newTunnel.activeRequests
+					t.requestTimeouts = newTunnel.requestTimeouts
+					t.Address = newTunnel.Address
+					return
+				}
+
+				// Log detailed error information
+				lastError = err
+				fmt.Printf("❌ Reconnection attempt %d failed: %v\n", attempt, err)
+				
+				// Log specific error types
+				if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+					fmt.Println("Server closed connection normally")
+				} else if websocket.IsUnexpectedCloseError(err) {
+					fmt.Println("Unexpected connection close")
+				} else if errors.Is(err, context.DeadlineExceeded) {
+					fmt.Println("Connection timeout")
+				}
+
+				if attempt < t.maxRetries {
+					delay := time.Duration(attempt) * t.reconnectDelay // Exponential backoff
+					fmt.Printf("Waiting %s before next attempt...\n", delay)
+					time.Sleep(delay)
+				}
 			}
-			t.closeOnce.Do(func() {
-				close(t.closeChan)
-				t.isChanClosed = true
-			})
+
+			fmt.Printf("❌ Unable to reconnect after %d attempts. Last error: %v\n", t.maxRetries, lastError)
+			fmt.Println("The tunnel will be closed. Please check your network connection and try again later.")
+
+			// Segnala l'errore finale e chiudi in modo sicuro
+			t.closeMutex.Lock()
+			if !t.isChanClosed {
+				select {
+				case t.closeChan <- err:
+				default:
+					// Il canale è pieno o chiuso, procedi con la chiusura
+				}
+				t.closeOnce.Do(func() {
+					close(t.closeChan)
+					t.isChanClosed = true
+				})
+			}
+			t.closeMutex.Unlock()
+			return
 		}
-		t.closeMutex.Unlock()
-		return
 	}
 }
 
@@ -347,13 +381,28 @@ func (t *Tunnel) cleanupRequest(requestID int) {
 	t.requestsMutex.Lock()
 	defer t.requestsMutex.Unlock()
 
+	// Verifica se il tunnel è chiuso
+	select {
+	case <-t.closeNotify:
+		return
+	default:
+	}
+
+	// Chiudi il writer se esiste
 	if writer, exists := t.activeRequests[requestID]; exists {
 		writer.Close()
 		delete(t.activeRequests, requestID)
 	}
 
+	// Ferma il timer se esiste
 	if timer, exists := t.requestTimeouts[requestID]; exists {
-		timer.Stop()
+		if !timer.Stop() {
+			// Se il timer è già scaduto, rimuovi il canale
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
 		delete(t.requestTimeouts, requestID)
 	}
 }
@@ -367,11 +416,18 @@ func (t *Tunnel) periodicCleanup() {
 		case <-t.closeChan:
 			return
 		case <-ticker.C:
-			t.requestsMutex.Lock()
-			for requestID := range t.activeRequests {
-				t.cleanupRequest(requestID)
+			// Get a snapshot of request IDs to avoid holding the lock too long
+			t.requestsMutex.RLock()
+			requestIDs := make([]int, 0, len(t.activeRequests))
+			for id := range t.activeRequests {
+				requestIDs = append(requestIDs, id)
 			}
-			t.requestsMutex.Unlock()
+			t.requestsMutex.RUnlock()
+
+			// Clean up each request individually
+			for _, id := range requestIDs {
+				t.cleanupRequest(id)
+			}
 		}
 	}
 }

@@ -149,8 +149,14 @@ func main() {
 
 				if message.Type == "close" {
 					t.listenersMutex.Lock()
-					close(t.listeners[message.RequestID])
-					delete(t.listeners, message.RequestID)
+					if listener, exists := t.listeners[message.RequestID]; exists {
+						select {
+						case <-listener: // Svuota il canale se necessario
+						default:
+						}
+						close(listener)
+						delete(t.listeners, message.RequestID)
+					}
 					t.listenersMutex.Unlock()
 					continue
 				}
@@ -161,10 +167,14 @@ func main() {
 					case listener <- message:
 					case <-time.After(2 * time.Second):
 						// If we can't send within 2 seconds, assume the listener is stuck
-						t.listenersMutex.RUnlock()
 						t.listenersMutex.Lock()
+						// Verifica doppia per evitare race condition
 						if l, stillExists := t.listeners[message.RequestID]; stillExists && l == listener && l != nil {
-							close(listener)
+							select {
+							case <-l: // Svuota il canale se necessario
+							default:
+							}
+							close(l)
 							delete(t.listeners, message.RequestID)
 							log.Printf("Cleaned up stuck listener for request %d (subdomain: %s)", message.RequestID, subdomain)
 						}
@@ -283,7 +293,7 @@ func main() {
 				}()
 			}
 
-			messageChannel := make(chan models.ClientMessage)
+			messageChannel := make(chan models.ClientMessage, 10) // Buffer per evitare blocchi
 			t.listenersMutex.Lock()
 			t.listeners[reqID] = messageChannel
 			t.listenersMutex.Unlock()
