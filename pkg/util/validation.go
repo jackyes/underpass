@@ -20,14 +20,27 @@ var (
 	}
 )
 
-// ValidatePath checks if the path is secure
+// ValidatePath checks if the path is secure (optimized version)
 func ValidatePath(path string) bool {
-	// Prevents path traversal and ensures the path starts with a slash
-	if strings.Contains(path, "..") || !strings.HasPrefix(path, "/") {
+	// Fast check for empty path
+	if len(path) == 0 {
 		return false
 	}
-	// Checks that it contains only allowed characters
-	//return validPathRegex.MatchString(path)
+	
+	// Check first character directly
+	if path[0] != '/' {
+		return false
+	}
+	
+	// Check for parent directory traversal using byte loop
+	if len(path) >= 2 {
+		for i := 0; i < len(path)-1; i++ {
+			if path[i] == '.' && path[i+1] == '.' {
+				return false
+			}
+		}
+	}
+	
 	return true
 }
 

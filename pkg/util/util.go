@@ -12,11 +12,11 @@ import (
 
 // msgPackPool is a sync.Pool for reusing byte slices to reduce memory allocations.
 const (
-	initialBufferSize = 1024
-	maxBufferSize     = 64 * 1024 // 64KB
+	initialBufferSize = 32 * 1024 // 32KB 
+	maxBufferSize     = 128 * 1024 // 128KB
 )
 
-var msgPackPool = &sync.Pool{
+var msgPackPool = sync.Pool{
 	New: func() interface{} {
 		return make([]byte, 0, initialBufferSize)
 	},
@@ -60,6 +60,8 @@ func WriteMsgPack(c *websocket.Conn, v interface{}) error {
 		if cap(buf) <= maxBufferSize {
 			buf = buf[:0] // Reset slice
 			msgPackPool.Put(buf)
+		} else {
+			msgPackPool.Put(make([]byte, 0, initialBufferSize))
 		}
 	}()
 

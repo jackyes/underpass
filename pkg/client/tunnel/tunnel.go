@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"math/rand"
 	"net/http"
 	"strings"
 	"sync"
@@ -30,9 +32,8 @@ type Tunnel struct {
 	closeCond    *sync.Cond
 	closeNotify  chan struct{} // Per notificare la chiusura
 
-	activeRequests    map[int]*io.PipeWriter
-	requestsMutex     sync.RWMutex
-	requestTimeouts   map[int]*time.Timer
+	activeRequests    sync.Map // map[int]*io.PipeWriter
+	requestTimeouts   sync.Map // map[int]*time.Timer
 	cleanupInterval   time.Duration
 	requestTimeout    time.Duration
 	reconnectAttempts int
@@ -95,9 +96,8 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 	t := &Tunnel{
 		closeChan:       closeChan,
 		closeNotify:     make(chan struct{}),
-		activeRequests:  make(map[int]*io.PipeWriter),
-		requestsMutex:   sync.RWMutex{},
-		requestTimeouts: make(map[int]*time.Timer),
+		activeRequests:  sync.Map{},
+		requestTimeouts: sync.Map{},
 		cleanupInterval: defaultCleanupInterval,
 		requestTimeout:  defaultRequestTimeout,
 		maxRetries:      defaultMaxRetries,
@@ -142,13 +142,11 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 				}
 				// Create the request with the original path
 				// Ensure proper URL construction
-				t.requestsMutex.Lock()
 				targetURL := address
 				if !strings.HasSuffix(targetURL, "/") && !strings.HasPrefix(msg.Request.Path, "/") {
 					targetURL += "/"
 				}
 				targetURL += msg.Request.Path
-				t.requestsMutex.Unlock()
 
 				request, err := http.NewRequestWithContext(ctx, msg.Request.Method, targetURL, read)
 				if err != nil {
@@ -162,13 +160,12 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 					continue
 				}
 
-				t.requestsMutex.Lock()
-				t.activeRequests[msg.RequestID] = write
+				// Store using sync.Map with optimized allocation
+				t.activeRequests.Store(msg.RequestID, write)
 				timer := time.AfterFunc(t.requestTimeout, func() {
 					t.cleanupRequest(msg.RequestID)
 				})
-				t.requestTimeouts[msg.RequestID] = timer
-				t.requestsMutex.Unlock()
+				t.requestTimeouts.Store(msg.RequestID, timer)
 
 				request.Header = msg.Request.Headers
 				request.Host = msg.Request.Host
@@ -244,13 +241,16 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 				}(request, msg.RequestID, cancel)
 			case "close":
 				fmt.Printf("Closing request ID: %d\n", msg.RequestID)
-				if v, ok := t.activeRequests[msg.RequestID]; ok {
-					v.Close()
-					delete(t.activeRequests, msg.RequestID)
+				if v, ok := t.activeRequests.LoadAndDelete(msg.RequestID); ok {
+					if pw, ok := v.(*io.PipeWriter); ok {
+						pw.Close()
+					}
 				}
 			case "data":
-				if v, ok := t.activeRequests[msg.RequestID]; ok {
-					v.Write(msg.Data)
+				if v, ok := t.activeRequests.Load(msg.RequestID); ok {
+					if pw, ok := v.(*io.PipeWriter); ok {
+						pw.Write(msg.Data)
+					}
 				}
 			case "error":
 				fmt.Printf("Error received: %s\n", msg.Error)
@@ -349,7 +349,10 @@ func (t *Tunnel) handleReconnection() {
 				}
 
 				if attempt < t.maxRetries {
-					delay := time.Duration(attempt) * t.reconnectDelay // Exponential backoff
+					// Exponential backoff with jitter and max cap
+					baseDelay := float64(t.reconnectDelay) * math.Pow(2, float64(attempt))
+					jitter := rand.Float64() * baseDelay * 0.2 // ±20% jitter
+					delay := time.Duration(math.Min(baseDelay + jitter, 30000)) // Max 30s
 					fmt.Printf("Waiting %s before next attempt...\n", delay)
 					time.Sleep(delay)
 				}
@@ -378,32 +381,30 @@ func (t *Tunnel) handleReconnection() {
 }
 
 func (t *Tunnel) cleanupRequest(requestID int) {
-	t.requestsMutex.Lock()
-	defer t.requestsMutex.Unlock()
-
-	// Verifica se il tunnel è chiuso
+	// Check if tunnel is closed first
 	select {
 	case <-t.closeNotify:
 		return
 	default:
 	}
 
-	// Chiudi il writer se esiste
-	if writer, exists := t.activeRequests[requestID]; exists {
-		writer.Close()
-		delete(t.activeRequests, requestID)
+	// Close writer if exists
+	if writer, ok := t.activeRequests.LoadAndDelete(requestID); ok {
+		if pw, ok := writer.(*io.PipeWriter); ok {
+			pw.Close()
+		}
 	}
 
-	// Ferma il timer se esiste
-	if timer, exists := t.requestTimeouts[requestID]; exists {
-		if !timer.Stop() {
-			// Se il timer è già scaduto, rimuovi il canale
-			select {
-			case <-timer.C:
-			default:
+	// Stop and remove timer
+	if timer, ok := t.requestTimeouts.LoadAndDelete(requestID); ok {
+		if t, ok := timer.(*time.Timer); ok {
+			if !t.Stop() {
+				select {
+				case <-t.C:
+				default:
+				}
 			}
 		}
-		delete(t.requestTimeouts, requestID)
 	}
 }
 
@@ -416,18 +417,13 @@ func (t *Tunnel) periodicCleanup() {
 		case <-t.closeChan:
 			return
 		case <-ticker.C:
-			// Get a snapshot of request IDs to avoid holding the lock too long
-			t.requestsMutex.RLock()
-			requestIDs := make([]int, 0, len(t.activeRequests))
-			for id := range t.activeRequests {
-				requestIDs = append(requestIDs, id)
-			}
-			t.requestsMutex.RUnlock()
-
-			// Clean up each request individually
-			for _, id := range requestIDs {
-				t.cleanupRequest(id)
-			}
+			// Iterate through all active requests using sync.Map's Range
+			t.activeRequests.Range(func(key, value interface{}) bool {
+				if requestID, ok := key.(int); ok {
+					t.cleanupRequest(requestID)
+				}
+				return true
+			})
 		}
 	}
 }
