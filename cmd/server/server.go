@@ -89,6 +89,7 @@ func main() {
 			// Tunnel already exists
 
 			writeMutex.Lock()
+			defer writeMutex.Unlock()
 			err = util.WriteMsgPack(c, models.ServerMessage{
 				Type:  "error",
 				Error: fmt.Sprintf("Tunnel %s is already in use.", subdomain),
@@ -96,7 +97,6 @@ func main() {
 			if err != nil {
 				log.Println(err)
 			}
-			writeMutex.Unlock()
 
 			c.Close()
 			return
@@ -112,6 +112,7 @@ func main() {
 
 		log.Printf("New tunnel created with subdomain: %s\n", subdomain)
 		writeMutex.Lock()
+		defer writeMutex.Unlock()
 		err = util.WriteMsgPack(c, models.ServerMessage{
 			Type:      "subdomain",
 			Subdomain: subdomain,
@@ -119,7 +120,6 @@ func main() {
 		if err != nil {
 			log.Println(err)
 		}
-		writeMutex.Unlock()
 
 		// Listen for messages (and disconnections)
 		closeChan := make(chan struct{})
@@ -200,6 +200,7 @@ func main() {
 				if req.Close {
 					// This indicates that the request body has ended
 					writeMutex.Lock()
+					defer writeMutex.Unlock()
 					err = util.WriteMsgPack(c, models.ServerMessage{
 						Type:      "close",
 						RequestID: req.RequestID,
@@ -207,7 +208,6 @@ func main() {
 					if err != nil {
 						log.Println(err)
 					}
-					writeMutex.Unlock()
 				} else {
 					// Handle request based on data type
 					if req.Data != nil {
@@ -220,16 +220,17 @@ func main() {
 									return
 								default:
 									writeMutex.Lock()
+									defer writeMutex.Unlock()
 									err = util.WriteMsgPack(c, models.ServerMessage{
 										Type:  "error",
 										Error: "Invalid request parameters",
 									})
-									writeMutex.Unlock()
 									continue
 								}
 							}
 
 							writeMutex.Lock()
+							defer writeMutex.Unlock()
 							err = util.WriteMsgPack(c, models.ServerMessage{
 								Type:      "request",
 								RequestID: req.RequestID,
@@ -238,9 +239,9 @@ func main() {
 							if err != nil {
 								log.Println(err)
 							}
-							writeMutex.Unlock()
 						} else if req.Data.RawData != nil {
 							writeMutex.Lock()
+							defer writeMutex.Unlock()
 							err = util.WriteMsgPack(c, models.ServerMessage{
 								Type:      "data",
 								RequestID: req.RequestID,
@@ -249,7 +250,6 @@ func main() {
 							if err != nil {
 								log.Println(err)
 							}
-							writeMutex.Unlock()
 						}
 					}
 				}

@@ -338,7 +338,7 @@ func (t *Tunnel) handleReconnection() {
 				// Log detailed error information
 				lastError = err
 				fmt.Printf("❌ Reconnection attempt %d failed: %v\n", attempt, err)
-				
+
 				// Log specific error types
 				if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
 					fmt.Println("Server closed connection normally")
@@ -352,7 +352,8 @@ func (t *Tunnel) handleReconnection() {
 					// Exponential backoff with jitter and max cap
 					baseDelay := float64(t.reconnectDelay) * math.Pow(2, float64(attempt))
 					jitter := rand.Float64() * baseDelay * 0.2 // ±20% jitter
-					delay := time.Duration(math.Min(baseDelay + jitter, 30000)) // Max 30s
+					maxDelay := float64(30 * time.Second)
+					delay := time.Duration(math.Min(baseDelay+jitter, maxDelay)) // Max 30s
 					fmt.Printf("Waiting %s before next attempt...\n", delay)
 					time.Sleep(delay)
 				}
