@@ -351,9 +351,8 @@ func (t *Tunnel) handleReconnection() {
 				if attempt < t.maxRetries {
 					// Exponential backoff with jitter and max cap
 					baseDelay := float64(t.reconnectDelay) * math.Pow(2, float64(attempt))
-					jitter := rand.Float64() * baseDelay * 0.2 // ±20% jitter
-					maxDelay := float64(30 * time.Second)
-					delay := time.Duration(math.Min(baseDelay+jitter, maxDelay)) // Max 30s
+					jitter := rand.Float64() * baseDelay * 0.2                // ±20% jitter
+					delay := time.Duration(math.Min(baseDelay+jitter, 30000)) // Max 30s
 					fmt.Printf("Waiting %s before next attempt...\n", delay)
 					time.Sleep(delay)
 				}
