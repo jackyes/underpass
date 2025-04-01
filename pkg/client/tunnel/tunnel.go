@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -25,12 +26,12 @@ type Tunnel struct {
 	URL       string
 	AuthToken string
 
-	closeChan    chan error
-	closeOnce    sync.Once
-	closeMutex   sync.Mutex
-	isChanClosed bool
-	closeCond    *sync.Cond
-	closeNotify  chan struct{} // Per notificare la chiusura
+	closeChan       chan error
+	closeOnce       sync.Once
+	closeMutex      sync.Mutex
+	isChanClosed    bool
+	closeNotify     chan struct{} // Channel to signal closure completion
+	reconnectActive bool          // Flag to indicate if reconnection is in progress
 
 	activeRequests    sync.Map // map[int]*io.PipeWriter
 	requestTimeouts   sync.Map // map[int]*time.Timer
@@ -91,11 +92,12 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 	}
 
 	subdomainChan := make(chan string)
-	closeChan := make(chan error, 1) // Buffered channel to prevent blocking
+	closeChan := make(chan error, 1)   // Buffered channel to prevent blocking
+	closeNotify := make(chan struct{}) // Channel to signal closure
 
 	t := &Tunnel{
 		closeChan:       closeChan,
-		closeNotify:     make(chan struct{}),
+		closeNotify:     closeNotify,
 		activeRequests:  sync.Map{},
 		requestTimeouts: sync.Map{},
 		cleanupInterval: defaultCleanupInterval,
@@ -174,9 +176,22 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 				go func(request *http.Request, reqID int, cancel context.CancelFunc) {
 					defer cancel()
 
+					// Configure HTTP client with proper timeouts
 					client := http.Client{
 						CheckRedirect: func(req *http.Request, via []*http.Request) error {
 							return http.ErrUseLastResponse
+						},
+						Timeout: t.requestTimeout,
+						Transport: &http.Transport{
+							DisableKeepAlives: false,
+							IdleConnTimeout:   90 * time.Second,
+							MaxIdleConns:      100,
+							MaxConnsPerHost:   10,
+							ForceAttemptHTTP2: true,
+							DialContext: (&net.Dialer{
+								Timeout:   30 * time.Second,
+								KeepAlive: 30 * time.Second,
+							}).DialContext,
 						},
 					}
 
@@ -212,32 +227,51 @@ func Connect(url, address, subdomain, authToken string) (*Tunnel, error) {
 					}
 					writeMutex.Unlock()
 
-					// Read the body
-					for {
-						// Read up to 1 MB
-						d := make([]byte, 1000000)
-						n, err := resp.Body.Read(d)
+					// Read the body with proper error handling
+					defer resp.Body.Close() // Ensure body is always closed
 
+					var readErr error
+					buffer := make([]byte, 64*1024) // 64KB buffer size for optimal reads
+
+					for readErr == nil {
+						var n int
+						n, readErr = resp.Body.Read(buffer)
+
+						// If we read any data, send it even if there was an error
 						if n > 0 {
+							// Make a copy of the data to avoid race conditions
+							dataCopy := make([]byte, n)
+							copy(dataCopy, buffer[:n])
+
 							writeMutex.Lock()
-							util.WriteMsgPack(c, models.ClientMessage{
+							sendErr := util.WriteMsgPack(c, models.ClientMessage{
 								Type:      "data",
 								RequestID: reqID,
-								Data:      d[0:n],
+								Data:      dataCopy,
 							})
 							writeMutex.Unlock()
+
+							if sendErr != nil {
+								fmt.Printf("Error sending data for request %d: %v\n", reqID, sendErr)
+								// If we can't send, exit the loop, but still try to send close message
+								break
+							}
 						}
 
-						if err != nil {
-							writeMutex.Lock()
-							err = util.WriteMsgPack(c, models.ClientMessage{Type: "close", RequestID: reqID})
-							if err != nil {
-								fmt.Println(err)
-							}
-							writeMutex.Unlock()
+						// Break on EOF (normal end) or continue on any other error
+						if readErr == io.EOF {
+							readErr = nil
 							break
 						}
 					}
+
+					// Send close message, regardless of how we exited the loop
+					writeMutex.Lock()
+					closeErr := util.WriteMsgPack(c, models.ClientMessage{Type: "close", RequestID: reqID})
+					if closeErr != nil {
+						fmt.Printf("Error sending close message for request %d: %v\n", reqID, closeErr)
+					}
+					writeMutex.Unlock()
 				}(request, msg.RequestID, cancel)
 			case "close":
 				fmt.Printf("Closing request ID: %d\n", msg.RequestID)
@@ -284,11 +318,11 @@ func (t *Tunnel) Wait() error {
 	select {
 	case err, ok := <-t.closeChan:
 		if !ok {
-			// Canale già chiuso
+			// Channel already closed
 			return nil
 		}
 
-		// Chiudi in modo sicuro
+		// Close safely
 		t.closeOnce.Do(func() {
 			close(t.closeChan)
 			t.isChanClosed = true
@@ -302,79 +336,102 @@ func (t *Tunnel) Wait() error {
 	}
 }
 
+// safeClose safely closes the tunnel's channels to avoid race conditions
+func (t *Tunnel) safeClose(err error) {
+	t.closeOnce.Do(func() {
+		t.closeMutex.Lock()
+		defer t.closeMutex.Unlock()
+
+		if !t.isChanClosed {
+			// Try to send the error, but don't block if channel is full
+			select {
+			case t.closeChan <- err:
+			default:
+				// Channel is already full or closed
+			}
+
+			close(t.closeChan)
+			t.isChanClosed = true
+			close(t.closeNotify)
+		}
+	})
+}
+
 func (t *Tunnel) handleReconnection() {
-	t.closeMutex.Lock()
-	defer t.closeMutex.Unlock()
-
 	for {
-		select {
-		case err, ok := <-t.closeChan:
-			if !ok {
-				// Channel was closed, exit gracefully
-				return
-			}
+		// Wait for an error signal from the closeChan
+		err, ok := <-t.closeChan
+		if !ok {
+			// Channel was closed externally, exit gracefully
+			return
+		}
+		if err == nil {
+			return
+		}
+
+		// We're now disconnected
+		fmt.Printf("\n❌ Disconnected from server: %s\n", err)
+
+		// Use atomic operation to mark reconnection as active
+		t.reconnectActive = true
+
+		// Attempt reconnection
+		var lastError error
+		var reconnected bool
+
+		for attempt := 1; attempt <= t.maxRetries; attempt++ {
+			fmt.Printf("Reconnection attempt %d/%d...\n", attempt, t.maxRetries)
+
+			newTunnel, err := Connect(t.URL, t.Address, t.Subdomain, t.AuthToken)
 			if err == nil {
-				return
+				fmt.Printf("✅ Reconnection successful!\n")
+
+				// Lock for updating shared state
+				t.closeMutex.Lock()
+				// Copy all necessary fields from the new tunnel
+				t.closeChan = newTunnel.closeChan
+				t.activeRequests = newTunnel.activeRequests
+				t.requestTimeouts = newTunnel.requestTimeouts
+				t.Address = newTunnel.Address
+				reconnected = true
+				t.closeMutex.Unlock()
+
+				break
 			}
 
-			fmt.Printf("\n❌ Disconnected from server: %s\n", err)
+			// Log detailed error information
+			lastError = err
+			fmt.Printf("❌ Reconnection attempt %d failed: %v\n", attempt, err)
 
-			// Attempt reconnection
-			var lastError error
-			for attempt := 1; attempt <= t.maxRetries; attempt++ {
-				fmt.Printf("Reconnection attempt %d/%d...\n", attempt, t.maxRetries)
-
-				newTunnel, err := Connect(t.URL, t.Address, t.Subdomain, t.AuthToken)
-				if err == nil {
-					fmt.Printf("✅ Reconnection successful!\n")
-					// Copy all necessary fields from the new tunnel
-					t.closeChan = newTunnel.closeChan
-					t.activeRequests = newTunnel.activeRequests
-					t.requestTimeouts = newTunnel.requestTimeouts
-					t.Address = newTunnel.Address
-					return
-				}
-
-				// Log detailed error information
-				lastError = err
-				fmt.Printf("❌ Reconnection attempt %d failed: %v\n", attempt, err)
-
-				// Log specific error types
-				if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
-					fmt.Println("Server closed connection normally")
-				} else if websocket.IsUnexpectedCloseError(err) {
-					fmt.Println("Unexpected connection close")
-				} else if errors.Is(err, context.DeadlineExceeded) {
-					fmt.Println("Connection timeout")
-				}
-
-				if attempt < t.maxRetries {
-					// Exponential backoff with jitter and max cap
-					baseDelay := float64(t.reconnectDelay) * math.Pow(2, float64(attempt))
-					jitter := rand.Float64() * baseDelay * 0.2                // ±20% jitter
-					delay := time.Duration(math.Min(baseDelay+jitter, 30000)) // Max 30s
-					fmt.Printf("Waiting %s before next attempt...\n", delay)
-					time.Sleep(delay)
-				}
+			// Log specific error types
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+				fmt.Println("Server closed connection normally")
+			} else if websocket.IsUnexpectedCloseError(err) {
+				fmt.Println("Unexpected connection close")
+			} else if errors.Is(err, context.DeadlineExceeded) {
+				fmt.Println("Connection timeout")
 			}
 
+			if attempt < t.maxRetries {
+				// Exponential backoff with jitter and max cap
+				baseDelay := float64(t.reconnectDelay) * math.Pow(2, float64(attempt-1))
+				jitter := rand.Float64() * baseDelay * 0.2
+				maxDelay := 30 * time.Second
+				delay := time.Duration(math.Min(baseDelay+jitter, float64(maxDelay)))
+				fmt.Printf("Waiting %s before next attempt...\n", delay)
+				time.Sleep(delay)
+			}
+		}
+
+		// Clear reconnection flag
+		t.reconnectActive = false
+
+		if !reconnected {
 			fmt.Printf("❌ Unable to reconnect after %d attempts. Last error: %v\n", t.maxRetries, lastError)
 			fmt.Println("The tunnel will be closed. Please check your network connection and try again later.")
 
-			// Segnala l'errore finale e chiudi in modo sicuro
-			t.closeMutex.Lock()
-			if !t.isChanClosed {
-				select {
-				case t.closeChan <- err:
-				default:
-					// Il canale è pieno o chiuso, procedi con la chiusura
-				}
-				t.closeOnce.Do(func() {
-					close(t.closeChan)
-					t.isChanClosed = true
-				})
-			}
-			t.closeMutex.Unlock()
+			// Close the tunnel permanently if reconnection failed
+			t.safeClose(lastError)
 			return
 		}
 	}

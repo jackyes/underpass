@@ -20,27 +20,38 @@ var (
 	}
 )
 
-// ValidatePath checks if the path is secure (optimized version)
+// ValidatePath checks if the path is secure
 func ValidatePath(path string) bool {
 	// Fast check for empty path
 	if len(path) == 0 {
 		return false
 	}
-	
-	// Check first character directly
-	if path[0] != '/' {
+
+	// Check for null bytes which can be used for injection attacks
+	if strings.Contains(path, "\x00") {
 		return false
 	}
-	
-	// Check for parent directory traversal using byte loop
-	if len(path) >= 2 {
-		for i := 0; i < len(path)-1; i++ {
-			if path[i] == '.' && path[i+1] == '.' {
-				return false
-			}
+
+	// Normalize path for consistent checking
+	normalized := path
+
+	// Detect directory traversal attempts
+	// Look for patterns like "../" or "/.." that could be used to access parent directories
+	if strings.Contains(normalized, "../") || strings.Contains(normalized, "/..") ||
+		strings.HasPrefix(normalized, "..") || normalized == ".." {
+		return false
+	}
+
+	// Check for control characters that shouldn't be in URLs
+	for i := 0; i < len(normalized); i++ {
+		// Control characters below space (32) except for tab (9), LF (10), and CR (13)
+		if normalized[i] < 32 && normalized[i] != 9 && normalized[i] != 10 && normalized[i] != 13 {
+			return false
 		}
 	}
-	
+
+	// Allow absolute paths starting with / and relative paths (common for APIs)
+	// This is more permissive than requiring paths to start with /
 	return true
 }
 

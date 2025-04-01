@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"net/http"
@@ -37,7 +38,26 @@ type Tunnel struct {
 
 var tunnels = make(map[string]*Tunnel)
 
-var upgrader = websocket.Upgrader{}
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		// Allow all connections - this is internal
+		return true
+	},
+}
+
+// Configuration constants
+const (
+	// Timeouts
+	websocketPingInterval = 30 * time.Second
+	websocketTimeout      = 60 * time.Second
+	requestTimeout        = 30 * time.Second
+
+	// Channel buffer sizes
+	requestChannelBuffer = 100
+	messageChannelBuffer = 10
+)
 
 func main() {
 	host := flag.String("host", "", "Host address")
@@ -102,11 +122,39 @@ func main() {
 			return
 		}
 
-		reqChan := make(chan Request)
+		reqChan := make(chan Request, requestChannelBuffer)
 		t := Tunnel{
 			reqChan:   reqChan,
 			listeners: make(map[int]chan models.ClientMessage),
 		}
+
+		// Set up ping/pong for connection health monitoring
+		c.SetReadDeadline(time.Now().Add(websocketTimeout))
+		c.SetPongHandler(func(string) error {
+			// Reset the read deadline upon receiving a pong
+			c.SetReadDeadline(time.Now().Add(websocketTimeout))
+			return nil
+		})
+
+		// Start a ping loop in a separate goroutine
+		pingTicker := time.NewTicker(websocketPingInterval)
+		pingDone := make(chan struct{})
+		go func() {
+			defer pingTicker.Stop()
+			for {
+				select {
+				case <-pingTicker.C:
+					// Send a ping message with the current timestamp
+					deadline := time.Now().Add(5 * time.Second)
+					if err := c.WriteControl(websocket.PingMessage, []byte{}, deadline); err != nil {
+						log.Printf("Failed to send ping to client %s: %v", subdomain, err)
+						// Don't close here - let the read timeout handle it
+					}
+				case <-pingDone:
+					return
+				}
+			}
+		}()
 
 		tunnels[subdomain] = &t
 
@@ -121,37 +169,51 @@ func main() {
 		}
 		writeMutex.Unlock()
 
-		// Listen for messages (and disconnections)
+		// Listen for messages and handle disconnections
 		closeChan := make(chan struct{})
 		go func() {
+			defer func() {
+				close(closeChan)
+				close(pingDone)
+				c.Close()
+
+				// Clean up all listeners
+				t.listenersMutex.Lock()
+				for id, listener := range t.listeners {
+					if listener != nil {
+						close(listener)
+						delete(t.listeners, id)
+					}
+				}
+				t.listenersMutex.Unlock()
+
+				// Remove tunnel from registry
+				delete(tunnels, subdomain)
+				log.Printf("Tunnel removed for subdomain: %s\n", subdomain)
+			}()
+
 			for {
 				var message models.ClientMessage
+
+				// Set read deadline for each message
+				c.SetReadDeadline(time.Now().Add(websocketTimeout))
+
 				err = util.ReadMsgPack(c, &message)
 				if err != nil {
-					log.Printf("Connection closed for subdomain: %s\n", subdomain)
-					close(closeChan)
-					c.Close()
-
-					// Clean up all listeners before removing tunnel
-					t.listenersMutex.Lock()
-					for id, listener := range t.listeners {
-						if listener != nil {
-							close(listener)
-							delete(t.listeners, id)
-						}
+					// Check for specific websocket error types for better logging
+					if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+						log.Printf("Unexpected close for subdomain %s: %v\n", subdomain, err)
+					} else {
+						log.Printf("Connection closed for subdomain: %s - %v\n", subdomain, err)
 					}
-					t.listenersMutex.Unlock()
-
-					delete(tunnels, subdomain)
-					log.Printf("Tunnel removed for subdomain: %s\n", subdomain)
-					break
+					return
 				}
 
 				if message.Type == "close" {
 					t.listenersMutex.Lock()
 					if listener, exists := t.listeners[message.RequestID]; exists {
 						select {
-						case <-listener: // Svuota il canale se necessario
+						case <-listener: // Drain the channel if necessary
 						default:
 						}
 						close(listener)
@@ -165,13 +227,14 @@ func main() {
 				if listener, ok := t.listeners[message.RequestID]; ok {
 					select {
 					case listener <- message:
-					case <-time.After(2 * time.Second):
-						// If we can't send within 2 seconds, assume the listener is stuck
+						// Message sent successfully
+					case <-time.After(requestTimeout):
+						// If we can't send within the timeout, clean up the listener
 						t.listenersMutex.Lock()
-						// Verifica doppia per evitare race condition
+						// Double-check to avoid race conditions
 						if l, stillExists := t.listeners[message.RequestID]; stillExists && l == listener && l != nil {
 							select {
-							case <-l: // Svuota il canale se necessario
+							case <-l: // Drain the channel if necessary
 							default:
 							}
 							close(l)
@@ -267,25 +330,46 @@ func main() {
 				Data:      &RequestData{HTTPRequest: r},
 			}
 
-			// Pipe request body
+			// Pipe request body with improved reliability
 			if r.Body != nil {
 				go func() {
-					for {
-						// Read up to 1 MB
-						d := make([]byte, 1000000)
-						n, err := r.Body.Read(d)
+					defer func() {
+						// Always send close request when finished
+						t.reqChan <- Request{
+							RequestID: reqID,
+							Close:     true,
+						}
+					}()
 
+					// Use a more reasonable buffer size
+					buffer := make([]byte, 64*1024) // 64KB buffer
+
+					for {
+						n, readErr := r.Body.Read(buffer)
+
+						// If we read any data, send it
 						if n > 0 {
-							t.reqChan <- Request{
+							// Copy the data to avoid buffer reuse issues
+							dataCopy := make([]byte, n)
+							copy(dataCopy, buffer[:n])
+
+							select {
+							case t.reqChan <- Request{
 								RequestID: reqID,
-								Data:      &RequestData{RawData: d[0:n]},
+								Data:      &RequestData{RawData: dataCopy},
+							}:
+								// Sent successfully
+							case <-time.After(5 * time.Second):
+								// Timeout sending to channel, log and continue
+								log.Printf("Warning: Timeout sending data for request %d", reqID)
+								continue
 							}
 						}
 
-						if err != nil {
-							t.reqChan <- Request{
-								RequestID: reqID,
-								Close:     true,
+						// Check for end of data or errors
+						if readErr != nil {
+							if readErr != io.EOF {
+								log.Printf("Read error for request %d: %v", reqID, readErr)
 							}
 							break
 						}
@@ -293,7 +377,7 @@ func main() {
 				}()
 			}
 
-			messageChannel := make(chan models.ClientMessage, 10) // Buffer per evitare blocchi
+			messageChannel := make(chan models.ClientMessage, messageChannelBuffer)
 			t.listenersMutex.Lock()
 			t.listeners[reqID] = messageChannel
 			t.listenersMutex.Unlock()

@@ -10,16 +10,58 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
-// msgPackPool is a sync.Pool for reusing byte slices to reduce memory allocations.
+// Buffer sizes based on message types for more efficient memory usage
 const (
-	initialBufferSize = 32 * 1024 // 32KB 
-	maxBufferSize     = 128 * 1024 // 128KB
+	// Small messages (headers, status updates)
+	smallBufferSize = 4 * 1024 // 4KB
+	// Medium messages (requests, responses)
+	mediumBufferSize = 32 * 1024 // 32KB
+	// Large messages (data chunks)
+	largeBufferSize = 128 * 1024 // 128KB
+	// Maximum buffer size to keep in pool
+	maxBufferSize = 256 * 1024 // 256KB
 )
 
-var msgPackPool = sync.Pool{
-	New: func() interface{} {
-		return make([]byte, 0, initialBufferSize)
-	},
+// Multiple pools for different message sizes to reduce memory waste
+var (
+	smallMsgPackPool = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, 0, smallBufferSize)
+		},
+	}
+
+	mediumMsgPackPool = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, 0, mediumBufferSize)
+		},
+	}
+
+	largeMsgPackPool = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, 0, largeBufferSize)
+		},
+	}
+)
+
+// getBuffer selects the appropriate buffer pool based on estimated size
+func getBuffer(estimatedSize int) []byte {
+	switch {
+	case estimatedSize <= smallBufferSize:
+		return smallMsgPackPool.Get().([]byte)
+	case estimatedSize <= mediumBufferSize:
+		return mediumMsgPackPool.Get().([]byte)
+	default:
+		return largeMsgPackPool.Get().([]byte)
+	}
+}
+
+// returnBuffer returns a buffer to the appropriate pool
+func returnBuffer(buf []byte, pool *sync.Pool) {
+	// Only keep reasonably sized buffers in pool
+	if cap(buf) <= maxBufferSize {
+		buf = buf[:0] // Reset slice length to 0
+		pool.Put(buf)
+	}
 }
 
 // MarshalRequest validates the HTTP request and converts it into a models.Request object.
@@ -53,31 +95,62 @@ func MarshalResponse(r *http.Response) models.Response {
 
 // WriteMsgPack marshals the given data into MessagePack format and writes it to the WebSocket connection.
 func WriteMsgPack(c *websocket.Conn, v interface{}) error {
-	// Get buffer from pool
-	buf := msgPackPool.Get().([]byte)
-	defer func() {
-		// Only keep reasonably sized buffers in pool
-		if cap(buf) <= maxBufferSize {
-			buf = buf[:0] // Reset slice
-			msgPackPool.Put(buf)
+	// Estimate size based on message type
+	var estimatedSize int
+
+	// Estimate size based on message type to select appropriate buffer
+	switch msg := v.(type) {
+	case models.ClientMessage:
+		if msg.Type == "data" && len(msg.Data) > 0 {
+			estimatedSize = len(msg.Data) + 128 // Data plus overhead
 		} else {
-			msgPackPool.Put(make([]byte, 0, initialBufferSize))
+			estimatedSize = mediumBufferSize
 		}
+	case models.ServerMessage:
+		if msg.Type == "data" && len(msg.Data) > 0 {
+			estimatedSize = len(msg.Data) + 128 // Data plus overhead
+		} else {
+			estimatedSize = mediumBufferSize
+		}
+	default:
+		estimatedSize = smallBufferSize
+	}
+
+	// Get buffer from appropriate pool
+	buf := getBuffer(estimatedSize)
+
+	// Determine which pool to return the buffer to
+	var poolToUse *sync.Pool
+	switch {
+	case cap(buf) <= smallBufferSize:
+		poolToUse = &smallMsgPackPool
+	case cap(buf) <= mediumBufferSize:
+		poolToUse = &mediumMsgPackPool
+	default:
+		poolToUse = &largeMsgPackPool
+	}
+
+	defer func() {
+		returnBuffer(buf, poolToUse)
 	}()
 
-	// Marshal data
+	// Marshal data directly without intermediate allocation
 	marshalled, err := msgpack.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("failed to marshal data: %w", err)
 	}
 
-	// If marshalled data is larger than current buffer capacity,
-	// allocate a new slice with exact needed capacity
+	// Use the marshalled data directly if it's too large for our buffer
 	if len(marshalled) > cap(buf) {
-		buf = make([]byte, len(marshalled))
-	} else {
-		buf = buf[:len(marshalled)]
+		err = c.WriteMessage(websocket.BinaryMessage, marshalled)
+		if err != nil {
+			return fmt.Errorf("failed to write message: %w", err)
+		}
+		return nil
 	}
+
+	// Otherwise use our pooled buffer
+	buf = buf[:len(marshalled)]
 	copy(buf, marshalled)
 
 	err = c.WriteMessage(websocket.BinaryMessage, buf)
